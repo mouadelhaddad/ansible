@@ -1,0 +1,17 @@
+- name: "Populate service facts"
+  ansible.builtin.service_facts:
+
+- name: "Get all failed services"
+  ansible.builtin.set_fact:
+    output_failed_services: >-
+      {{ ansible_facts.services | default({}) | dict2items
+         | selectattr('value.state', 'equalto', 'stopped')
+         | selectattr('value.status', 'equalto', 'failed')
+         | rejectattr('key', 'search', '^user')
+         | map(attribute='value')
+         | list }}
+
+- name: "Set services_in_error_list and flag"
+  ansible.builtin.set_fact:
+    services_in_error_list: "{{ output_failed_services }}"
+    flag_service_error: "{{ output_failed_services | length > 0 }}"

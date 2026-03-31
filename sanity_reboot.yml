@@ -1,0 +1,35 @@
+---
+# ─── Phase grouping ──────────────────────────────────────────────────────────
+# reboot_order = 0  →  no ordering constraint, all hosts reboot in parallel
+# reboot_order = N  →  sequential, hosts processed one by one in ascending order
+#
+# AWX Survey / Extra Vars (all optional, have defaults):
+#   pre_reboot_delay_server  - seconds in wall message before reboot (default: 30)
+#   reboot_wait_minutes      - pause after reboot in minutes         (default: 0)
+
+- name: "Group hosts by reboot order"
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: "Assign host to reboot group"
+      ansible.builtin.group_by:
+        key: >-
+          {{ 'reboot_unordered' if reboot_order | default(0) | int == 0
+             else 'reboot_phase_' + (reboot_order | int | string) }}
+
+# ─── Unordered: reboot all in parallel (reboot_order = 0) ───────────────────
+- name: "Sanity Reboot - Unordered"
+  hosts: reboot_unordered
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - ansible.builtin.import_tasks: tasks/reboot_worker.yml
+
+# ─── Ordered: reboot one by one in ascending order (reboot_order > 0) ────────
+- name: "Sanity Reboot - Ordered"
+  hosts: "reboot_phase_1:reboot_phase_2:reboot_phase_3:reboot_phase_4:reboot_phase_5"
+  serial: 1
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - ansible.builtin.import_tasks: tasks/reboot_worker.yml

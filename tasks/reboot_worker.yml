@@ -1,0 +1,99 @@
+---
+# ─── Service discovery + pre-reboot check ────────────────────────────────────
+- name: "Populate service facts"
+  ansible.builtin.service_facts:
+
+- name: "Build enabled_service_list and detect pre-reboot errors"
+  ansible.builtin.set_fact:
+    enabled_service_list: >-
+      {{ ansible_facts.services | default({}) | dict2items
+         | map(attribute='value') | list }}
+    services_in_error_list_before: >-
+      {{ ansible_facts.services | default({}) | dict2items
+         | selectattr('value.state', 'equalto', 'stopped')
+         | selectattr('value.status', 'equalto', 'failed')
+         | rejectattr('key', 'search', '^user')
+         | map(attribute='value') | list }}
+
+- name: "Snapshot pre-reboot error state"
+  ansible.builtin.set_fact:
+    flag_service_error_before: "{{ services_in_error_list_before | length > 0 }}"
+
+# ─── Reboot ──────────────────────────────────────────────────────────────────
+- name: "Send a warning message to connected users"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/wall
+      - -n
+      - "Ansible info: System will reboot for maintenance purposes in {{ pre_reboot_delay | default(5) }} seconds"
+  changed_when: false
+
+- name: "Reboot machine {{ inventory_hostname }}"
+  ansible.builtin.reboot:
+    reboot_timeout: 600
+    connect_timeout: 10
+    post_reboot_delay: 60
+    msg: "Ansible info: System will reboot for maintenance purposes in {{ pre_reboot_delay | default(5) }} seconds"
+  register: output_wait_reboot_return
+
+- name: "Set continue_reboot flag"
+  ansible.builtin.set_fact:
+    continue_reboot: "{{ not output_wait_reboot_return.failed | bool }}"
+
+- name: "Optional pause after reboot: {{ reboot_wait_minutes_var | default(0) }} minutes"
+  ansible.builtin.pause:
+    minutes: "{{ reboot_wait_minutes_var | default(0) }}"
+  when: reboot_wait_minutes_var | default(0) | int > 0
+
+# ─── Post-reboot: restart stopped services + detect failures ─────────────────
+- name: "Populate service facts after reboot"
+  ansible.builtin.service_facts:
+
+- name: "Identify stopped services to restart"
+  ansible.builtin.set_fact:
+    activating_svc_return: >-
+      {{ ansible_facts.services | default({}) | dict2items
+         | selectattr('value.state', 'equalto', 'stopped')
+         | selectattr('value.status', 'in', ['failed', 'enabled'])
+         | rejectattr('key', 'search', '^user')
+         | map(attribute='value') | list }}
+
+- name: "Start stopped services"
+  ansible.builtin.service:
+    name: "{{ item.name }}"
+    state: started
+    daemon_reload: true
+  loop: "{{ activating_svc_return | default([]) }}"
+  register: status_service_return
+  failed_when: false
+
+- name: "Build post-reboot error state from service results"
+  ansible.builtin.set_fact:
+    failed_svc_lst: >-
+      {{ status_service_return.results | default([])
+         | selectattr('failed', 'defined')
+         | selectattr('failed', 'equalto', true)
+         | map(attribute='item.name') | list }}
+    services_in_error_list_after: >-
+      {{ status_service_return.results | default([])
+         | selectattr('failed', 'defined')
+         | selectattr('failed', 'equalto', true)
+         | map(attribute='item') | list }}
+    flag_service_error_after: >-
+      {{ status_service_return.results | default([])
+         | selectattr('failed', 'defined')
+         | selectattr('failed', 'equalto', true)
+         | list | length > 0 }}
+
+# ─── Final report ─────────────────────────────────────────────────────────────
+- name: "Send final report to workflow"
+  ansible.builtin.set_stats:
+    data:
+      reboot_report:
+        - host: "{{ inventory_hostname }}"
+          failed_services_before: "{{ services_in_error_list_before | default([]) | map(attribute='name') | list }}"
+          failed_services_after: "{{ failed_svc_lst | default([]) }}"
+          flag_service_error_before: "{{ flag_service_error_before | default(false) }}"
+          flag_service_error_after: "{{ flag_service_error_after | default(false) }}"
+          stopped_services_restarted: "{{ activating_svc_return | default([]) | map(attribute='name') | list }}"
+    aggregate: true
